@@ -1,0 +1,29 @@
+# Build output
+build/
+*.o
+*.obj
+*.a
+*.lib
+
+# Game data and reverse-engineering artefacts -- tied to a specific title
+# (Artemis archives ship .csv metadata next to every .png), never commit these
+*.pfs
+*.csv
+*.i64
+*.id0
+*.id1
+*.nam
+
+# Runtime logs and temporary files
+*.log
+*.tmp
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*~
+
+# Windows
+Thumbs.db
+desktop.ini

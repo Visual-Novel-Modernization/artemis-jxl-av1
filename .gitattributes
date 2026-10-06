@@ -1,0 +1,13 @@
+# Normalize line endings: LF in the repository, CRLF on Windows checkout
+* text=auto
+
+# Keep assembly as LF (for GNU as)
+*.S  text eol=lf
+*.s  text eol=lf
+
+# Binary
+*.dll  binary
+*.exe  binary
+*.pfs  binary
+*.png  binary
+*.jxl  binary
