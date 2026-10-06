@@ -170,22 +170,37 @@ Put `launcher.exe` and `artemis_jxl.dll` next to the game executable and run
    launcher.exe "<path to the game exe>"
    ```
 
-2. **Otherwise it scans its own directory** for `*.exe` and picks the first
-   entry that is not `launcher.exe`. That enumeration comes back alphabetical,
-   so a directory holding one game executable resolves correctly every time.
+2. **Otherwise it scans the directory** for `*.exe` and takes the first one
+   whose PE content matches this engine (the prologue bytes at the target RVA).
+
+Matching is by **content, not by name**, since game directories often hold a
+crash handler, bundled tools and other `*.exe` files. An explicitly supplied
+executable goes through the same check. Relative DLL paths are resolved against
+the launcher's directory.
 
 The rest of the command line:
 
 | Argument | Effect |
 |---|---|
 | `<game exe>` | what to launch — the first argument not starting with `-` |
-| `--dll <path>` | inject this DLL instead of `artemis_jxl.dll` beside the launcher |
+| `--dll <path>` | inject this instead of `artemis_jxl.dll` beside the launcher |
+| `--extra-dll <path>` | also inject this DLL (repeatable, up to four) |
 | `-- <args...>` | everything after `--` is handed to the game |
 | any other `-flag` | appended to the game's command line |
 
-**Directories holding more than one `.exe` need the explicit form.** A patched
-build, the game's own launcher and a second-language executable all appear in
-that list, and step 2 takes whichever sorts first.
+### Running alongside another patch
+
+Patches that ship their own injector stub can't be passed to `launcher.exe`:
+the stub would be injected instead of the game. Name the game and the patch's
+DLL instead:
+
+```
+launcher.exe "<game exe>" --extra-dll "<the other patch's dll>"
+```
+
+Both DLLs go in while the process is suspended. An `--extra-dll` that fails to
+load is logged and skipped. The two patches must hook different layers (e.g.
+file reads vs. the PNG decoder) or they will collide.
 
 ---
 
@@ -251,8 +266,9 @@ them located again:
 
 | Constant | File | Meaning |
 |---|---|---|
-| `RVA_PNG_LOADER` | `src/hook.cpp` | the engine's high-level PNG reader |
-| `EXPECTED_PROLOGUE` | `src/hook.cpp` | first 5 bytes of that function, used as a safety check |
+| `ARTEMIS_RVA_PNG_LOADER` | `src/target.h` | the engine's high-level PNG reader RVA |
+| `ARTEMIS_PROLOGUE` | `src/target.h` | first 5 bytes of that function, used as a safety check |
+| `ARTEMIS_PROLOGUE_LEN` | `src/target.h` | number of prologue bytes checked and patched |
 
 How to find it (IDA + Hex-Rays):
 
@@ -263,12 +279,11 @@ How to find it (IDA + Hex-Rays):
    and `png_read_info` — that is the engine's PNG reader
 4. Confirm its first 5 bytes are `55 8B EC 6A FF`
    (`push ebp; mov ebp, esp; push -1`) with no relative operands among them;
-   if not, adjust `PROLOGUE_LEN` accordingly
-5. Put the RVA into `RVA_PNG_LOADER`
+   if not, adjust `ARTEMIS_PROLOGUE_LEN` accordingly
+5. Put the RVA and prologue bytes into `src/target.h`.
 
-`EXPECTED_PROLOGUE` is a runtime safety check: if the prologue does not match,
-the hook is abandoned and a line is written to the log rather than corrupting
-the game.
+The launcher and the DLL both use these values to verify the target before
+launching or patching; a mismatch abandons the hook and logs a line.
 
 ---
 

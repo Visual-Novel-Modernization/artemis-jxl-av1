@@ -12,12 +12,7 @@
 #include <jxl/decode.h>
 
 #include "jxl2png.h"
-
-// sub_60BE50 in the game exe (ImageBase 0x400000)
-static const unsigned long RVA_PNG_LOADER = 0x20BE50;
-// 55 8B EC 6A FF = push ebp; mov ebp,esp; push -1
-static const unsigned char EXPECTED_PROLOGUE[5] = {0x55, 0x8B, 0xEC, 0x6A, 0xFF};
-static const int PROLOGUE_LEN = 5;
+#include "target.h"
 
 extern "C" void PngLoaderThunk(void);
 extern "C" void *__cdecl JxlMaybeSwapStream(void *stream);
@@ -286,11 +281,50 @@ extern "C" void *__cdecl JxlMaybeSwapStream(void *stream) {
     return &t_slot->shim;
 }
 
+// Reading past the module end faults inside DllMain, which the loader
+// reports as a plain "load failed". Check the RVA first.
+static bool RvaInsideModule(HMODULE mod, unsigned long rva, size_t len) {
+    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)mod;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    const IMAGE_NT_HEADERS *nt =
+        (const IMAGE_NT_HEADERS *)((const unsigned char *)mod + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+    return (unsigned long long)rva + len <= nt->OptionalHeader.SizeOfImage;
+}
+
+// Even in range, the page may be uncommitted or unreadable.
+static bool TargetIsMapped(const unsigned char *p) {
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery(p, &mbi, sizeof(mbi)) == 0) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return false;
+    const DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                           PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+                           PAGE_EXECUTE_WRITECOPY;
+    if (!(mbi.Protect & readable)) return false;
+    const unsigned char *end =
+        (const unsigned char *)mbi.BaseAddress + mbi.RegionSize;
+    return end >= p + ARTEMIS_PROLOGUE_LEN;
+}
+
 static bool InstallHook() {
     HMODULE base = GetModuleHandleW(NULL);
-    unsigned char *target = (unsigned char *)base + RVA_PNG_LOADER;
 
-    if (memcmp(target, EXPECTED_PROLOGUE, PROLOGUE_LEN) != 0) {
+    if (!RvaInsideModule(base, ARTEMIS_RVA_PNG_LOADER, ARTEMIS_PROLOGUE_LEN)) {
+        Log("HOOK: not this engine -- RVA 0x%lX is past the end of the image at "
+            "%p, nothing installed",
+            ARTEMIS_RVA_PNG_LOADER, (void *)base);
+        return false;
+    }
+    unsigned char *target = (unsigned char *)base + ARTEMIS_RVA_PNG_LOADER;
+
+    if (!TargetIsMapped(target)) {
+        Log("HOOK: 0x%lX is not readable in %p, nothing installed",
+            ARTEMIS_RVA_PNG_LOADER, (void *)base);
+        return false;
+    }
+
+    if (memcmp(target, ARTEMIS_PROLOGUE, ARTEMIS_PROLOGUE_LEN) != 0) {
         Log("HOOK: prologue mismatch at %p: %02X %02X %02X %02X %02X", target,
             target[0], target[1], target[2], target[3], target[4]);
         return false;
@@ -303,25 +337,27 @@ static bool InstallHook() {
         Log("HOOK: trampoline VirtualAlloc failed %lu", GetLastError());
         return false;
     }
-    memcpy(g_tramp, target, PROLOGUE_LEN);
-    g_tramp[PROLOGUE_LEN] = 0xE9;
-    *(int *)(g_tramp + PROLOGUE_LEN + 1) =
-        (int)((target + PROLOGUE_LEN) - (g_tramp + PROLOGUE_LEN + 5));
+    memcpy(g_tramp, target, ARTEMIS_PROLOGUE_LEN);
+    g_tramp[ARTEMIS_PROLOGUE_LEN] = 0xE9;
+    *(int *)(g_tramp + ARTEMIS_PROLOGUE_LEN + 1) =
+        (int)((target + ARTEMIS_PROLOGUE_LEN) -
+              (g_tramp + ARTEMIS_PROLOGUE_LEN + 5));
     g_trampEntry = g_tramp;
     FlushInstructionCache(GetCurrentProcess(), g_tramp, TRAMP_SIZE);
 
     DWORD old = 0;
-    if (!VirtualProtect(target, PROLOGUE_LEN, PAGE_EXECUTE_READWRITE, &old)) {
+    if (!VirtualProtect(target, ARTEMIS_PROLOGUE_LEN, PAGE_EXECUTE_READWRITE,
+                        &old)) {
         Log("HOOK: VirtualProtect failed %lu", GetLastError());
         return false;
     }
-    unsigned char patch[PROLOGUE_LEN];
+    unsigned char patch[ARTEMIS_PROLOGUE_LEN];
     patch[0] = 0xE9;
     *(int *)(patch + 1) = (int)((unsigned char *)&PngLoaderThunk - (target + 5));
-    memcpy(target, patch, PROLOGUE_LEN);
+    memcpy(target, patch, ARTEMIS_PROLOGUE_LEN);
     DWORD tmp = 0;
-    VirtualProtect(target, PROLOGUE_LEN, old, &tmp);
-    FlushInstructionCache(GetCurrentProcess(), target, PROLOGUE_LEN);
+    VirtualProtect(target, ARTEMIS_PROLOGUE_LEN, old, &tmp);
+    FlushInstructionCache(GetCurrentProcess(), target, ARTEMIS_PROLOGUE_LEN);
 
     Log("HOOK: installed at %p (base=%p, thunk=%p, tramp=%p)", target, base,
         (void *)&PngLoaderThunk, (void *)g_tramp);
@@ -343,7 +379,8 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID reserved) {
             GetCurrentProcessId(), (int)g_enabled);
         Log("libjxl statically linked, JxlDecoderVersion=0x%08X", (unsigned)JxlDecoderVersion());
 
-        if (g_enabled) InstallHook();
+        // Not the target engine: don't register an AV1 decoder.
+        if (g_enabled && !InstallHook()) return TRUE;
 
         HANDLE th = CreateThread(NULL, 0, Av1InitThread, NULL, 0, NULL);
         if (th) CloseHandle(th);
