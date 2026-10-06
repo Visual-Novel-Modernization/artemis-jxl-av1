@@ -142,8 +142,10 @@ function Build-Test {
     Write-Ok "Built $exe"
     if (Test-Path $exe) {
         Write-Host '  --- Running ---'
-        & $exe
-        Write-Host "  Exit code: $LASTEXITCODE"
+        & $exe | Out-Host
+        $runCode = $LASTEXITCODE
+        Write-Host "  Exit code: $runCode"
+        if ($runCode -ne 0) { return 1 }
     }
     return 0
 }
